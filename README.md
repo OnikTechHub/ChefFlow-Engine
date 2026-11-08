@@ -33,7 +33,11 @@ High-performance, production-ready culinary & recipe backend service powered by 
 | Header | Value | Description |
 |---|---|---|
 | `Content-Type` | `application/json` | Required |
-| `Authorization` | `Bearer <JWT_TOKEN>` | Optional in development (defaults to Guest Chef) |
+| `Authorization` | `Bearer <JWT_TOKEN>` | Required (User must have role `chef` or `admin` and `membershipStatus: 'active'`) |
+
+### Access Control Requirements
+- **Required Roles**: `chef`, `admin` (regular `user` accounts receive `403 Forbidden`).
+- **Required Membership**: `active` (`inactive`, `expired`, or `suspended` accounts receive `403 Forbidden`). Admins bypass membership expiration checks.
 
 ### Request Body Example
 ```json

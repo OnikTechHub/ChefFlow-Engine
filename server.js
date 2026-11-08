@@ -3,8 +3,10 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
+import path from 'path';
 import { connectDB } from './config/db.js';
 import recipeRoutes from './routes/recipe.routes.js';
+import authRoutes from './routes/auth.routes.js';
 import { globalLimiter } from './middlewares/rateLimiter.middleware.js';
 import { notFoundHandler, errorHandler } from './middlewares/error.middleware.js';
 
@@ -44,7 +46,7 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id', 'x-user-role', 'x-membership-status'],
   })
 );
 
@@ -56,6 +58,9 @@ if (process.env.NODE_ENV !== 'test') {
 // Body parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static uploads directory for recipe images
+app.use('/uploads', express.static(path.resolve('uploads')));
 
 // Global Rate Limiter
 app.use(globalLimiter);
@@ -70,6 +75,7 @@ app.get('/health', (req, res) => {
 });
 
 // API Routes
+app.use('/api/auth', authRoutes);
 app.use('/api/recipes', recipeRoutes);
 
 // 404 Handler
@@ -87,4 +93,3 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 export default app;
-

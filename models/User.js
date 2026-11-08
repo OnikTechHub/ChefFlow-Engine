@@ -29,6 +29,21 @@ const userSchema = new mongoose.Schema(
       enum: ['user', 'chef', 'admin'],
       default: 'chef',
     },
+    membershipStatus: {
+      type: String,
+      enum: ['active', 'inactive', 'pending', 'expired', 'suspended'],
+      default: 'active',
+      index: true,
+    },
+    membershipTier: {
+      type: String,
+      enum: ['free', 'pro_chef', 'master_chef', 'enterprise'],
+      default: 'pro_chef',
+    },
+    membershipExpiresAt: {
+      type: Date,
+      default: null,
+    },
     avatar: {
       type: String,
       default: '',
@@ -61,6 +76,17 @@ userSchema.pre('save', async function () {
 // Compare password helper
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
+};
+
+// Check if user has an active, non-expired membership
+userSchema.methods.hasActiveMembership = function () {
+  if (this.membershipStatus !== 'active') {
+    return false;
+  }
+  if (this.membershipExpiresAt && new Date() > new Date(this.membershipExpiresAt)) {
+    return false;
+  }
+  return true;
 };
 
 export const User = mongoose.model('User', userSchema);
