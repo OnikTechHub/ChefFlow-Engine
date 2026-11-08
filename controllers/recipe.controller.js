@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { validationResult } from 'express-validator';
 import { Recipe } from '../models/Recipe.js';
 import { sendSuccess, sendError, asyncHandler } from '../utils/apiResponse.js';
 
@@ -8,6 +9,22 @@ import { sendSuccess, sendError, asyncHandler } from '../utils/apiResponse.js';
  * @access  Private (or authenticated chef)
  */
 export const createRecipe = asyncHandler(async (req, res) => {
+  // Defense-in-depth: check express-validator errors before database interaction
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    const formattedErrors = errors.array().map((err) => ({
+      field: err.path || err.param,
+      message: err.msg,
+      value: err.value !== undefined ? err.value : null,
+    }));
+    return sendError(
+      res,
+      'Validation failed: Title and valid ingredients are required before creating a recipe.',
+      400,
+      formattedErrors
+    );
+  }
+
   const recipeData = { ...req.body };
 
   // Associate recipe with authenticated user if present

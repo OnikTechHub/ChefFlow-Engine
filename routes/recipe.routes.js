@@ -8,9 +8,9 @@ import {
   scaleRecipe,
   searchByIngredients,
 } from '../controllers/recipe.controller.js';
+import { validateRecipeCreation } from '../middlewares/recipeValidator.middleware.js';
 import { validateBody } from '../middlewares/validate.middleware.js';
 import {
-  createRecipeSchema,
   updateRecipeSchema,
   scaleRecipeSchema,
 } from '../validations/recipe.validation.js';
@@ -21,13 +21,14 @@ const router = Router();
 
 /**
  * @route   POST /api/recipes
- * @desc    Create a new recipe with Zod validation, rate limiting, and author binding
+ * @desc    Create a new recipe with express-validator checks (enforcing title and ingredients),
+ *          rate limiting, authentication, and secure MongoDB storage.
  */
 router.post(
   '/',
   recipeCreationLimiter,
   verifyAuth,
-  validateBody(createRecipeSchema),
+  validateRecipeCreation,
   createRecipe
 );
 

@@ -12,9 +12,9 @@ High-performance, production-ready culinary & recipe backend service powered by 
   - Automatic URL-safe slug generation with collision handling.
   - Automatic `totalTime` calculation (`prepTime` + `cookTime`).
   - Full-text MongoDB search indexes across title, description, cuisine, tags, and ingredients.
-- **Strict Validation via Zod**: Clean, fail-fast validation middleware preventing malformed payloads from touching the database.
+- **Strict Validation via express-validator & Zod**: Clean, fail-fast validation middleware enforcing required `title` and `ingredients` fields, preventing malformed payloads from touching MongoDB.
 - **RESTful Endpoints**:
-  - **Create Recipe**: `POST /api/recipes` with rate-limiting, authentication, and validation.
+  - **Create Recipe**: `POST /api/recipes` protected with `express-validator` security checks, rate-limiting, authentication, and unique slug generation.
   - **Search & Filter**: `GET /api/recipes` with pagination, regex/text search, and multi-field filters (`cuisine`, `category`, `difficulty`, `dietaryInfo`, `maxTime`).
   - **Single Recipe Retrieval**: `GET /api/recipes/:idOrSlug` supports lookup by MongoDB ObjectId or human-readable slug.
   - **Dynamic Serving Scaling**: `POST /api/recipes/:id/scale` recalculates all ingredient proportions dynamically for target servings.
@@ -179,7 +179,10 @@ npm start
 npm run seed
 ```
 
-### 5. Run Verification Tests
+### 5. Run Verification & Security Tests
 ```bash
+npm test
+# or individually:
+node test/express-validator.test.js
 node test/recipe.test.js
 ```
