@@ -7,6 +7,7 @@ import {
   deleteRecipe,
   scaleRecipe,
   searchByIngredients,
+  generateShoppingList,
 } from '../controllers/recipe.controller.js';
 import {
   addOrUpdateReview,

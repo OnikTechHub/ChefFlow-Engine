@@ -26,8 +26,37 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'chef', 'admin'],
-      default: 'chef',
+      enum: ['normal', 'premium', 'chef', 'admin'],
+      default: 'normal',
+      index: true,
+    },
+    stripeCustomerId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    stripeSubscriptionId: {
+      type: String,
+      default: null,
+    },
+    stripePriceId: {
+      type: String,
+      default: null,
+    },
+    stripeCurrentPeriodEnd: {
+      type: Date,
+      default: null,
+    },
+    subscriptionStatus: {
+      type: String,
+      enum: ['none', 'active', 'trialing', 'past_due', 'canceled', 'unpaid', 'incomplete'],
+      default: 'none',
+      index: true,
+    },
+    publishedRecipesCount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     membershipStatus: {
       type: String,

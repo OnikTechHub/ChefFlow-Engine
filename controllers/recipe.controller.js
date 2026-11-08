@@ -1,72 +1,251 @@
 import mongoose from 'mongoose';
+import jwt from 'jsonwebtoken';
 import { validationResult } from 'express-validator';
 import { Recipe } from '../models/Recipe.js';
+import { User } from '../models/User.js';
+import { verifyStripeSubscriptionStatus } from '../config/stripe.js';
 import { sendSuccess, sendError, asyncHandler } from '../utils/apiResponse.js';
+import {
+  generateGroceryList,
+  inferDietaryLabels,
+  detectAllergens,
+} from '../services/culinary.service.js';
+
+// Recipe publishing quotas by account tier
+const NORMAL_TIER_RECIPE_LIMIT = 5;
 
 /**
- * @desc    Create a new recipe
+ * @desc    Secure, production-ready Express controller to create and publish a recipe.
+ *          Features:
+ *          1) JWT Authentication & RBAC (Normal vs. Premium vs. Admin)
+ *          2) express-validator input validation
+ *          3) Stripe subscription verification for publishing quotas
+ *          4) Structured JSON error & success responses with appropriate HTTP status codes
  * @route   POST /api/recipes
- * @access  Private (or authenticated chef)
+ * @access  Private (Authenticated Normal, Premium, or Admin user)
  */
 export const createRecipe = asyncHandler(async (req, res) => {
-  // Defense-in-depth: check express-validator errors before database interaction
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    const formattedErrors = errors.array().map((err) => ({
-      field: err.path || err.param,
-      message: err.msg,
-      value: err.value !== undefined ? err.value : null,
-    }));
-    return sendError(
-      res,
-      'Validation failed: Title and valid ingredients are required before creating a recipe.',
-      400,
-      formattedErrors
-    );
-  }
+  // =========================================================================
+  // 1. JWT AUTHENTICATION & IDENTITY EXTRACTION (Defense-in-Depth)
+  // =========================================================================
+  let user = req.user;
 
-  const recipeData = { ...req.body };
+  // If user is not already attached by an upstream middleware, extract from JWT Bearer token
+  if (!user || !user._id) {
+    const authHeader = req.headers.authorization;
 
-  // Associate recipe with authenticated user if present
-  if (req.user && req.user._id) {
-    recipeData.author = req.user._id;
-    recipeData.authorName = req.user.name || recipeData.authorName;
-  } else if (!recipeData.authorName) {
-    recipeData.authorName = 'ChefFlow Culinary Team';
-  }
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        code: 'AUTH_TOKEN_MISSING',
+        message: 'Authentication failed: Missing or malformed Bearer token in Authorization header.',
+      });
+    }
 
-  // Ensure totalTime is computed
-  if (recipeData.prepTime != null && recipeData.cookTime != null) {
-    recipeData.totalTime = recipeData.prepTime + recipeData.cookTime;
-  }
+    const token = authHeader.split(' ')[1];
 
-  // Check for duplicate recipe title by the same author to prevent accidental re-submissions
-  if (recipeData.author) {
-    const existingRecipe = await Recipe.findOne({
-      title: new RegExp(`^${recipeData.title.trim()}$`, 'i'),
-      author: recipeData.author,
-    });
-
-    if (existingRecipe) {
-      return sendError(
-        res,
-        'You have already created a recipe with this exact title',
-        409,
-        { existingRecipeId: existingRecipe._id, existingSlug: existingRecipe.slug }
+    try {
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET || 'chefflow_super_secret_jwt_key_2026_dev'
       );
+
+      user = await User.findById(decoded.id).select('+password');
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          code: 'AUTH_USER_NOT_FOUND',
+          message: 'Authentication failed: The user account associated with this token no longer exists.',
+        });
+      }
+    } catch (jwtErr) {
+      return res.status(401).json({
+        success: false,
+        code: 'AUTH_TOKEN_INVALID',
+        message: 'Authentication failed: Token is invalid or has expired.',
+        error: process.env.NODE_ENV === 'development' ? jwtErr.message : undefined,
+      });
     }
   }
 
-  // Instantiate and save the recipe document (triggers Mongoose schema pre-validate hooks)
+  // Account standing check
+  if (user.membershipStatus === 'suspended') {
+    return res.status(403).json({
+      success: false,
+      code: 'ACCOUNT_SUSPENDED',
+      message: 'Access denied: Your account is currently suspended. Please contact support.',
+    });
+  }
+
+  // =========================================================================
+  // 2. EXPRESS-VALIDATOR INPUT VALIDATION
+  // =========================================================================
+  const validationErrors = validationResult(req);
+
+  if (!validationErrors.isEmpty()) {
+    const formattedErrors = validationErrors.array().map((err) => ({
+      field: err.path || err.param,
+      message: err.msg,
+      rejectedValue: err.value !== undefined ? err.value : null,
+    }));
+
+    return res.status(400).json({
+      success: false,
+      code: 'VALIDATION_FAILED',
+      message: 'Validation failed: Required recipe fields (title, ingredients) or nested properties are invalid.',
+      errors: formattedErrors,
+    });
+  }
+
+  // =========================================================================
+  // 3. ROLE-BASED ACCESS CONTROL (RBAC) & STRIPE SUBSCRIPTION VERIFICATION
+  // =========================================================================
+  const userRole = (user.role || 'normal').toLowerCase();
+  const isAdmin = userRole === 'admin';
+  const isPremium = userRole === 'premium' || userRole === 'chef';
+
+  // Count recipes already published by this author in MongoDB
+  const currentPublishedCount = await Recipe.countDocuments({
+    author: user._id,
+    status: 'published',
+  });
+
+  // CASE A: NORMAL TIER USERS (Free tier with quota limit)
+  if (!isAdmin && !isPremium) {
+    if (currentPublishedCount >= NORMAL_TIER_RECIPE_LIMIT) {
+      return res.status(402).json({
+        success: false,
+        code: 'PUBLISHING_QUOTA_EXCEEDED',
+        message: `Free Normal Tier publishing limit reached (${NORMAL_TIER_RECIPE_LIMIT} recipes). Please upgrade to Premium for unlimited publishing.`,
+        quota: {
+          tier: 'normal',
+          limit: NORMAL_TIER_RECIPE_LIMIT,
+          publishedCount: currentPublishedCount,
+          remaining: 0,
+          upgradeUrl: '/pricing?plan=premium',
+        },
+      });
+    }
+  }
+
+  // CASE B: PREMIUM TIER USERS (Verified via Stripe API)
+  if (isPremium && !isAdmin) {
+    if (!user.stripeSubscriptionId) {
+      return res.status(402).json({
+        success: false,
+        code: 'STRIPE_SUBSCRIPTION_REQUIRED',
+        message: 'No active Stripe subscription found on file for this Premium account. Please subscribe to unlock unlimited publishing.',
+        subscription: {
+          status: 'none',
+          checkoutUrl: '/checkout/premium-chef',
+        },
+      });
+    }
+
+    // Query Stripe to verify current subscription standing
+    const stripeVerification = await verifyStripeSubscriptionStatus(user.stripeSubscriptionId);
+
+    if (!stripeVerification.isValid) {
+      // Sync subscription state to MongoDB
+      user.subscriptionStatus = stripeVerification.status || 'canceled';
+      await user.save();
+
+      return res.status(402).json({
+        success: false,
+        code: 'STRIPE_SUBSCRIPTION_INACTIVE',
+        message: `Your Stripe subscription is currently '${stripeVerification.status}'. An active subscription is required to publish recipes.`,
+        subscription: {
+          status: stripeVerification.status,
+          subscriptionId: user.stripeSubscriptionId,
+          billingPortalUrl: '/billing/portal',
+        },
+      });
+    }
+
+    // Refresh cached period end if present
+    if (stripeVerification.currentPeriodEnd) {
+      user.stripeCurrentPeriodEnd = stripeVerification.currentPeriodEnd;
+      user.subscriptionStatus = 'active';
+      await user.save();
+    }
+  }
+
+  // =========================================================================
+  // 4. DUPLICATE RECIPE TITLE PREVENTION (409 Conflict)
+  // =========================================================================
+  const { title } = req.body;
+  const normalizedTitle = title.trim();
+
+  const duplicateRecipe = await Recipe.findOne({
+    author: user._id,
+    title: new RegExp(`^${normalizedTitle}$`, 'i'),
+  });
+
+  if (duplicateRecipe) {
+    return res.status(409).json({
+      success: false,
+      code: 'DUPLICATE_RECIPE_TITLE',
+      message: `You have already published a recipe titled '${normalizedTitle}'. Please choose a distinct title.`,
+      conflict: {
+        existingRecipeId: duplicateRecipe._id,
+        existingSlug: duplicateRecipe.slug,
+      },
+    });
+  }
+
+  // =========================================================================
+  // 5. RECIPE DOCUMENT PREPARATION & MONGODB PERSISTENCE
+  // =========================================================================
+  const recipeData = { ...req.body };
+
+  // Bind authenticated author metadata
+  recipeData.author = user._id;
+  recipeData.authorName = user.name || 'ChefFlow Chef';
+
+  // Ensure totalTime calculation
+  if (recipeData.prepTime != null && recipeData.cookTime != null) {
+    recipeData.totalTime = Number(recipeData.prepTime) + Number(recipeData.cookTime);
+  }
+
+  // Automatically infer dietary preferences if not explicitly populated
+  if (!recipeData.dietaryInfo || recipeData.dietaryInfo.length === 0) {
+    recipeData.dietaryInfo = inferDietaryLabels(recipeData.ingredients);
+  }
+
+  // Persist recipe (triggers pre-validate hooks for slug generation)
   const newRecipe = new Recipe(recipeData);
   await newRecipe.save();
 
-  // Populate author details if referenced
-  if (newRecipe.author) {
-    await newRecipe.populate('author', 'name email avatar specialties');
-  }
+  // Update user published recipe count atomically
+  await User.findByIdAndUpdate(user._id, {
+    $inc: { publishedRecipesCount: 1 },
+  });
 
-  return sendSuccess(res, 'Recipe created successfully', newRecipe, 201);
+  // Populate author details for the client
+  await newRecipe.populate('author', 'name email avatar role specialties');
+
+  // =========================================================================
+  // 6. STRUCTURED SUCCESS RESPONSE (201 Created)
+  // =========================================================================
+  const remainingQuota = isPremium || isAdmin
+    ? 'unlimited'
+    : Math.max(0, NORMAL_TIER_RECIPE_LIMIT - (currentPublishedCount + 1));
+
+  return res.status(201).json({
+    success: true,
+    code: 'RECIPE_PUBLISHED',
+    message: 'Recipe created and published successfully.',
+    data: {
+      recipe: newRecipe,
+      publishingQuota: {
+        tier: userRole,
+        publishedCount: currentPublishedCount + 1,
+        limit: isPremium || isAdmin ? 'unlimited' : NORMAL_TIER_RECIPE_LIMIT,
+        remainingQuota,
+      },
+    },
+  });
 });
 
 /**
@@ -369,6 +548,44 @@ export const searchByIngredients = asyncHandler(async (req, res) => {
   return sendSuccess(res, 'Recipes matched by pantry ingredients', scoredRecipes, 200, {
     matchedCount: scoredRecipes.length,
     searchedIngredients: searchTerms,
+  });
+});
+
+/**
+ * @desc    Generate a consolidated supermarket shopping list from multiple recipes
+ * @route   POST /api/recipes/grocery-list
+ * @access  Public
+ */
+export const generateShoppingList = asyncHandler(async (req, res) => {
+  const { recipeIds = [], customServings = {} } = req.body;
+
+  if (!Array.isArray(recipeIds) || recipeIds.length === 0) {
+    return sendError(res, 'Please provide an array of recipe IDs to compile a shopping list', 400);
+  }
+
+  // Validate ObjectIds
+  const validIds = recipeIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+  if (validIds.length === 0) {
+    return sendError(res, 'No valid recipe ObjectIds provided', 400);
+  }
+
+  const recipes = await Recipe.find({ _id: { $in: validIds } }).lean();
+  if (recipes.length === 0) {
+    return sendError(res, 'None of the requested recipes were found', 404);
+  }
+
+  // Build items array for grocery generator with custom or default servings
+  const items = recipes.map((recipe) => ({
+    recipe,
+    targetServings: customServings[recipe._id.toString()] || recipe.servings,
+  }));
+
+  const groceryList = generateGroceryList(items);
+
+  return sendSuccess(res, 'Grocery list generated successfully', {
+    recipeCount: recipes.length,
+    recipesIncluded: recipes.map((r) => ({ id: r._id, title: r.title, servings: customServings[r._id.toString()] || r.servings })),
+    groceryList,
   });
 });
 
